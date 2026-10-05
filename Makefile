@@ -1273,3 +1273,66 @@ include docs/manual/manual.mk
 .PHONY: .WAIT
 
 endif #umask / $(CURDIR) / $(O)
+
+#-------------------------------------------------------------------------------
+# CUSTOM DEBIAN ARM64 UNROOT HYBRID BUILD EXTENSION
+#-------------------------------------------------------------------------------
+.PHONY: debian_arm64_netiso
+
+UNROOT_VER = 1.0.5
+UNROOT_BIN = $(TOPDIR)/unroot
+ARM64_TARGET_DIR = $(BASE_DIR)/target_arm64
+ARM64_ISO_DIR    = $(BASE_DIR)/iso_arm64
+
+debian_arm64_netiso:
+	@echo "=== [ARM64 BUILDER] Initializing Host Cross-Compilation Toolchains ==="
+	@sudo dpkg --add-architecture arm64 2>/dev/null || true
+	@sudo apt-get update -qq || true
+	@sudo apt-get install -y -qq xorriso squashfs-tools bsdtar debootstrap mtools \
+		crossbuild-essential-arm64 clang llvm libpdf-api2-perl sysvinit-core
+
+	@echo "=== [ARM64 BUILDER] Verifying Unroot v$(UNROOT_VER) Engine ==="
+	@if [ ! -f "$(UNROOT_BIN)" ]; then \
+		curl -L -o $(UNROOT_BIN) "https://github.com"; \
+		chmod +x $(UNROOT_BIN); \
+	fi
+
+	@echo "=== [ARM64 BUILDER] Instantiating Clean Debian Base ==="
+	@mkdir -p $(BINARIES_DIR) $(ARM64_TARGET_DIR) $(ARM64_ISO_DIR)/live
+	@if [ ! -f "$(ARM64_TARGET_DIR)/etc/passwd" ]; then \
+		sudo debootstrap --arch=arm64 --variant=minbase "bookworm" "$(ARM64_TARGET_DIR)" "http://debian.org"; \
+		sudo chown -R $$(id -u):$$(id -g) "$(ARM64_TARGET_DIR)"; \
+	fi
+
+	@echo "=== [ARM64 BUILDER] Injecting ShredOS Core & Toolchains via Unroot ==="
+	@$(UNROOT_BIN) single --cwd "$(ARM64_TARGET_DIR)" --env PATH=/usr/sbin:/usr/bin:/sbin:/bin -- \
+		apt-get update && apt-get install -y --no-install-recommends \
+		nwipe smartmontools hdparm nvme-cli build-essential clang rustc cargo util-linux
+
+	@echo "=== [ARM64 BUILDER] Blending ShredOS Overlay Asset States ==="
+	@if [ -d "board/shredos/fsoverlay" ]; then \
+		cp -r board/shredos/fsoverlay/etc/* "$(ARM64_TARGET_DIR)/etc/" 2>/dev/null || true; \
+		cp -r board/shredos/fsoverlay/usr/bin/* "$(ARM64_TARGET_DIR)/usr/bin/" 2>/dev/null || true; \
+	fi
+
+	@echo "=== [ARM64 BUILDER] Compiling Wiping TUI Init Sequence ==="
+	@echo '#!/bin/sh' > "$(ARM64_TARGET_DIR)/usr/bin/nwipe_launcher"
+	@echo 'clear && echo "======================================================"' >> "$(ARM64_TARGET_DIR)/usr/bin/nwipe_launcher"
+	@echo 'echo "  SHREDOS SYSTEM DATA DESTRUCTION INTERFACE (ARM64)   "' >> "$(ARM64_TARGET_DIR)/usr/bin/nwipe_launcher"
+	@echo 'echo "======================================================"' >> "$(ARM64_TARGET_DIR)/usr/bin/nwipe_launcher"
+	@echo '/usr/bin/nwipe --verify=last --PDFreportpath=/var/log/shredos/' >> "$(ARM64_TARGET_DIR)/usr/bin/nwipe_launcher"
+	@chmod +x "$(ARM64_TARGET_DIR)/usr/bin/nwipe_launcher"
+	@echo '1:2345:respawn:/usr/bin/nwipe_launcher </dev/tty1 >/dev/tty1 2>&1' >> "$(ARM64_TARGET_DIR)/etc/inittab"
+
+	@echo "=== [ARM64 BUILDER] Compressing Filesystem via Unroot ==="
+	@$(UNROOT_BIN) pack "$(ARM64_TARGET_DIR)" "$(ARM64_ISO_DIR)/live/filesystem.squashfs"
+
+	@echo "=== [ARM64 BUILDER] Generating Bootable Hybrid ISO Asset via Xorriso ==="
+	@xorriso -as mkisofs -R -r -J -joliet-long -l \
+		-b live/filesystem.squashfs -no-emul-boot -boot-load-size 4 -boot-info-table \
+		-o "$(BINARIES_DIR)/shredos-debian-arm64.iso" "$(ARM64_ISO_DIR)"
+
+	@echo "========================================================================"
+	@echo " [SUCCESS] Custom Bootable NetISO Compiled Successfully!"
+	@echo " Target Output Location: $(BINARIES_DIR)/shredos-debian-arm64.iso"
+	@echo "========================================================================"
